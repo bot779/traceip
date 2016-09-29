@@ -1,0 +1,73 @@
+#!/bin/sh
+
+while echo $1 |grep "^-" >/dev/null
+do
+  case $1 in
+
+    "--switch" )
+      SWITCH="$2"
+      shift;shift
+      ;;
+
+    "--debug" )
+      DEBUG="true"
+      shift
+      ;;
+
+    "--help" | "-?" | "-h" | * )
+      echo Usage:
+      echo $0 "[OPTIONS] <SUBNET> <STARTOCTET> <ENDOCTET>"
+      echo OPTIONS:
+      echo "--help -? -h"
+      echo "--debug         ;# show debugging info"
+      echo "--switch        ;# specify a switch to query"
+      exit
+      ;;
+  esac
+done
+
+DEBUG=${DEBUG:-"false"}
+SWITCH=${SWITCH:-"192.168.1.254"}
+QueryDevice=$SWITCH
+
+
+$DEBUG && echo SWITCH = $SWITCH
+
+
+ifIndex=$1
+ifDescr="1.3.6.1.2.1.2.2.1.2"
+
+#QueryDevice=192.168.1.254
+
+
+if [ -z $ifIndex ]
+then
+  OID=${ifDescr}
+  $DEBUG && echo snmpwalk -On -c public -v2c $QueryDevice $OID
+  snmpwalk -On -c public -v2c $QueryDevice $OID \
+  | sed 's/^.*\.\([^ ]*\) = [^ ]*: /\1 /'
+
+else
+  # print the interface description
+  OID=${ifDescr}.${ifIndex}
+  $DEBUG && echo snmpwalk -On -c public -v2c $QueryDevice $OID
+  snmpwalk -On -c public -v2c $QueryDevice $OID \
+  | sed 's/^.* = [^ ]*: //'
+
+  # if subinterfaces exist, print their interface descriptions
+  MEMBERS=`./getifmembers $ifIndex`
+  if [ "${MEMBERS}x" != 0x ]
+  then
+    $DEBUG && echo SubInterface List: $MEMBERS
+    echo +
+    echo $MEMBERS | xargs -n1 echo \
+    | while read SUBINTERFACE
+    do
+      OID=${ifDescr}.${SUBINTERFACE}
+      #$DEBUG && echo snmpwalk -On -c public -v2c $QueryDevice $OID
+      snmpwalk -On -c public -v2c $QueryDevice $OID
+    done \
+    | sed 's/^.* = [^ ]*: /+ /'
+  fi
+
+fi

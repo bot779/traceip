@@ -1,0 +1,169 @@
+#!/bin/sh
+
+# iproutetable .1.3.6.1.2.1.4.21.1
+#  ipRouteEntry .1
+#   ipRouteDest IpAddress .1
+#   ipRouteIfIndex INTEGER .2
+#   ipRouteMetric1 INTEGER .3
+#   ipRouteMetric2 INTEGER .4
+#   ipRouteMetric3 INTEGER .5
+#   ipRouteMetric4 INTEGER .6
+#   ipRouteNextHop IpAddress .7
+#   ipRouteType INTEGER .8
+#   ipRouteProto INTEGER .9
+#   ipRouteAge INTEGER .10
+#   ipRouteMask IpAddress .11
+#   ipRouteMetric5 INTEGER .12
+#
+#   ipRouteInfo OBJECT IDENTIFIER .13
+
+
+while echo $1 |grep "^-" >/dev/null
+do
+  case $1 in
+    "--all" | "--showall" )
+      SHOWALL=true
+      # echo showing non-responding hosts
+      shift
+      ;;
+
+    "--router" )
+      ROUTER="$2"
+      shift;shift
+      ;;
+
+    "--IP" | "--ip" )
+      IPAddress="$2"
+      shift;shift
+      ;;
+
+    "--VLAN" | "--vlan" )
+      VLAN="$2"
+      shift;shift
+      ;;
+
+    "--debug" )
+      DEBUG="true"
+      shift
+      ;;
+
+    "--hexoutput" )
+      HEXOUTPUT="true"
+      shift
+      ;;
+
+    "--decoutput" )
+      DECOUTPUT="true"
+      shift
+      ;;
+
+    "--help" | "-?" | "-h" | * )
+      echo Usage:
+      echo $0 "[OPTIONS] <SUBNET> <STARTOCTET> <ENDOCTET>"
+      echo OPTIONS:
+      echo "--help -? -h"
+      echo "--all --showall ;# show nonresponding hosts"
+      echo "--debug         ;# show debugging info"
+      echo "--ip            ;# specify a single IP Address to lookup"
+      echo "--router        ;# specify a router to query"
+      echo "--vlan          ;# specify the vlan number of the IP address"
+      echo "--hexoutput     ;# output the MAC address as an snmp Hex-STRING"
+      echo "--decoutput     ;# convert the MAC address to dotted-decimal form (useful for the next snmp query)"
+      exit
+      ;;
+  esac
+done
+
+DEBUG=${DEBUG:-"false"}
+ROUTER=${ROUTER:-"192.168.1.254"}
+QueryDevice=$ROUTER
+HEXOUTPUT=${HEXOUTPUT:-"false"}
+DECOUTPUT=${DECOUTPUT:-"false"}
+
+if [ "${IPAddress}x" != "x" ]
+then
+
+  $DEBUG && echo VLAN is "${VLAN}" >&2
+  if [ "${VLAN}x" = "x" ]
+  then
+    # The VLAN number was not specified
+    VLAN=`echo $IPAddress|sed -e 's/^[^.]*\.[^.]*\.//' -e 's/\.[^.]*$//'`
+    # Assuming that the third octet matches the VLAN number...
+    $DEBUG && echo Third Octet is $VLAN >&2
+  fi
+
+
+  ifDescr=".1.3.6.1.2.1.2.2.1.2"
+  #ifDescr maps Interface_Index to VLAN_Number
+  OID=$ifDescr
+  VLANRECORD=`
+  $DEBUG && echo "snmpwalk -On -c public -v2c -Pe -m "'""'" $QueryDevice $OID" >&2
+  snmpwalk -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+  |fgrep -e '"'Vlan${VLAN}'"' \
+  |sed -e 's/^'"${ifDescr}."'//' -e 's/ = [^"]*"/ /' -e 's/"[^"]*$//'`
+  $DEBUG && echo VLANRECORD is $VLANRECORD >&2
+  INT_INDEX=`echo $VLANRECORD|( read INT_INDEX JUNK; echo $INT_INDEX ) `
+  $DEBUG && echo scanning interface index $INT_INDEX >&2
+
+  atPhysAddress=".1.3.6.1.2.1.3.1.1.2"
+  #atPhysAddress maps Interface_Index+IP_address to MAC_Address
+  OID=${atPhysAddress}.${INT_INDEX}.1.${IPAddress}
+  OUTPUT=`
+  $DEBUG && echo "snmpwalk -On -c public -v2c -Pe -m "'""'" $QueryDevice $OID" >&2
+  snmpwalk -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+  | sed -e 's/'"$OID"' = *//' \
+  | if $HEXOUTPUT || $DECOUTPUT
+    then
+      sed -e 's/Hex-STRING: *//'
+    else
+      sed -e 's/Hex-STRING: \(..\) \(..\) \(..\) \(..\) \(..\) \(..\) *$/\1\2.\3\4.\5\6/'
+    fi`
+  if $DECOUTPUT
+  then
+    ./hex2dec $OUTPUT
+  else
+    echo $OUTPUT
+  fi
+  #echo PAUSE
+  #read
+else
+  atPhysAddress=".1.3.6.1.2.1.3.1.1.2"
+  #atPhysAddress maps Interface_Index+IP_address to MAC_Address
+  OID=${atPhysAddress}
+  $DEBUG && echo "snmpwalk -On -c public -v2c -Pe -m "'""'" $QueryDevice $OID" >&2
+  snmpwalk -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+  | sed -e 's/'"$OID"' = *//' \
+  | if $HEXOUTPUT
+    then
+      sed -e 's/Hex-STRING: *//'
+    else
+      sed -e 's/Hex-STRING: \(..\) \(..\) \(..\) \(..\) \(..\) \(..\) *$/\1\2.\3\4.\5\6/'
+    fi
+
+fi
+
+exit
+####################################################
+
+
+#snmpwalk -c public -v2c -Pe -m ./mibs/CISCO-SMI.my:./mibs/CISCO-STACK-MIB.my 192.168.1.254 .1.3.6.1.2.1.3.1.1.1
+ifDescr=".1.3.6.1.2.1.2.2.1.2"
+#ifDescr maps Interface_Index to VLAN_Number
+OID=$ifDescr
+snmpwalk -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+|sed -e 's/^'"${ifDescr}."'//' -e 's/ = [^"]*"/ /' -e 's/"[^"]*$//'
+#|sed -e 's/^'"$ifDescr"//" -e 's/^[^"]*"//' -e 's/"[^"]*$//'
+
+atIfIndex=".1.3.6.1.2.1.3.1.1.1"
+# RFC1213-MIB::atIfIndex maps Interface_Index+IP_Address to Interface_Index
+# OID=$atIfIndex
+
+#atPhysAddress=".1.3.6.1.2.1.3.1.1.2"
+#atPhysAddress maps Interface_Index+IP_address to MAC_Address
+#OID=$atPhysAddress
+
+
+#snmpwalk -c public -v2c -Pe -m ""  $QueryDevice $OID
+#snmpwalk -c public -v2c -Pe $QueryDevice $OID
+#snmpwalk -On -c public -v2c -Pe  $QueryDevice $OID
+snmpwalk -On -c public -v2c -Pe -m "" $QueryDevice $OID

@@ -1,0 +1,234 @@
+#!/bin/sh
+
+# getmactable is intended to be called from traceip
+#  it will provide either the port a mac lives on or...
+#  the IP address of the switch(es) attached to that port if CDP info is available.
+
+while echo $1 |grep "^-" >/dev/null
+do
+  case $1 in
+    "--all" | "--showall" )
+      SHOWALL=true
+      # echo showing non-responding hosts
+      shift
+      ;;
+
+    "--switch" )
+      SWITCH="$2"
+      shift;shift
+      ;;
+
+    "--MAC" | "--mac" )
+      MAC="$2"
+      shift;shift
+      ;;
+
+    "--debug" )
+      DEBUG="true"
+      shift
+      ;;
+
+    "--vlan" )
+      VLAN="$2"
+      shift;shift
+      ;;
+
+    "--help" | "-?" | "-h" | * )
+      echo Usage:
+      echo $0 "[OPTIONS] <SUBNET> <STARTOCTET> <ENDOCTET>"
+      echo OPTIONS:
+      echo "--help -? -h"
+      echo "--debug         ;# show debugging info"
+      echo "--MAC           ;# specify a single MAC Address to lookup"
+      echo "--switch        ;# specify a switch to query"
+      echo "--vlan          ;# look for MAC address in this vlan"
+      exit 2
+      ;;
+  esac
+done
+
+
+
+SWITCH=${SWITCH:-192.168.1.95}
+QueryDevice=$SWITCH
+DEBUG=${DEBUG:-"false"}
+$DEBUG && echo QueryDevice is $QueryDevice >&2
+
+TAB=`echo -e "\t"`
+
+if [ "${MAC}x" = "x" ]
+then
+  $DEBUG && echo no MAC address specified, dumping entire vlan >&2
+  if [ "${VLAN}x" = "x" ]
+  then
+    $DEBUG && echo no VLAN specified, dumping all vlans >&2
+    vtpVlanType=".1.3.6.1.4.1.9.9.46.1.3.1.1.3"
+    vtpVlanName=".1.3.6.1.4.1.9.9.46.1.3.1.1.4"
+    OID=$vtpVlanType
+    $DEBUG && echo 'snmpwalk -r2 -c public -On -v2c -Pe -m "" '"$QueryDevice $OID"
+    snmpwalk -r2 -c public -On -v2c -Pe -m "" $QueryDevice $OID \
+    | sed -e 's/^'"$OID"'//' \
+          -e 's/^\.1\.//' \
+          -e 's/ =[^:]*://'
+  else
+    $DEBUG && echo VLAN is "$VLAN" >&2
+    echo $VLAN 1
+  fi \
+  | while read VLAN VLANTYPE JUNK
+  do
+    if [ "${VLANTYPE}" = "1" ]
+    then
+      $DEBUG && echo VLAN $VLAN DATA >&2
+      $DEBUG && echo "###############" >&2
+      #snmpwalk -c public@253 -v2c -Pe -m ./mibs/CISCO-SMI.my:./mibs/CISCO-STACK-MIB.my $QueryDevice .1.3.6.1.2.1.17.4.3.1.1
+      dot1dTpFdbAddress=".1.3.6.1.2.1.17.4.3.1.1"
+      OID=$dot1dTpFdbAddress
+      #OID=".1.3.6.1.2.1.17.1.4.1.2.262"
+      OID=".1.3.6.1.2.1.17.1.4.1.2"
+      $DEBUG && echo 'snmpwalk -r2 -c public@'${VLAN} '-On -v2c -Pe -m ""' $QueryDevice $OID
+      snmpwalk -r2 -c public@${VLAN} -On -v2c -Pe -m "" $QueryDevice $OID \
+      | sed -e 's/^'"$OID"'//'
+    else
+      $DEBUG && echo ignoring VLAN $VLAN of type $VLANTYPE >&2
+    fi
+  done
+else
+  VLAN=${VLAN:-3}
+  $DEBUG && echo VLAN is "$VLAN" >&2
+  dot1dTpFdbAddress=".1.3.6.1.2.1.17.4.3.1.1"
+  dot1dTpFdbPort=".1.3.6.1.2.1.17.4.3.1.2"
+  #BRIDGE-MIB::dot1dTpFdbPort maps from decimal mac address to bridge_port_number
+  OID=$dot1dTpFdbPort"."$MAC
+  $DEBUG && echo Querying $OID >&2
+  BRIDGENUMBER=`
+  snmpwalk -r2 -On -c public@${VLAN} -v2c -Pe -m "" $QueryDevice $OID \
+  | sed -e 's/^'"$OID"'//' \
+        -e 's/ = [^:]*: *//'`
+  if [ "${BRIDGENUMBER}x" = "x" ] || echo $BRIDGENUMBER | fgrep -i "no such instance"  >/dev/null
+  then
+    # Try again, but without community string indexing
+    BRIDGENUMBER=`
+    snmpwalk -r2 -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+    | sed -e 's/^'"$OID"'//' \
+          -e 's/ = [^:]*: *//'`
+    if [ "${BRIDGENUMBER}x" = "x" ] || echo $BRIDGENUMBER | fgrep -i "no such instance"  >/dev/null
+    then
+      echo failed during mapping from mac_address to bridge_port_number >&2
+      echo 'snmpwalk -r2 -On -c public'"@${VLAN}"' -v2c -Pe -m ""'" $QueryDevice $OID" >&2
+      $DEBUG && echo BRIDGENUMBER is "$BRIDGENUMBER" >&2
+      exit 2
+    fi
+  fi
+  $DEBUG && echo BRIDGENUMBER is "$BRIDGENUMBER" >&2
+
+  dot1dBasePortIfIndex=".1.3.6.1.2.1.17.1.4.1.2"
+  #BRIDGE-MIB::dot1dBasePortIfIndex maps bridge_port_number to Interface_Index
+  OID=$dot1dBasePortIfIndex
+  OID=${dot1dBasePortIfIndex}"."${BRIDGENUMBER}
+  $DEBUG && echo Querying $OID >&2
+  INT_INDEX=`
+  snmpwalk -r2 -On -c public@${VLAN} -v2c -Pe -m "" $QueryDevice $OID \
+  | sed -e 's/^'"${OID}"'//' \
+        -e 's/ = [^:]*: *//'`
+  if [ "${INT_INDEX}x" = "x" ] || echo $INT_INDEX | fgrep -i "no such instance"  >/dev/null
+  then
+    # Try again, but without community string indexing
+    INT_INDEX=`
+    snmpwalk -r2 -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+    | sed -e 's/^'"${OID}"'//' \
+          -e 's/ = [^:]*: *//'`
+    if [ "${INT_INDEX}x" = "x" ] || echo $INT_INDEX | fgrep -i "no such instance"  >/dev/null
+    then
+      #echo failed during mapping of bridge_port_number to Interface_Index >&2
+      #echo 'snmpwalk -r2 -On -c public'"@${VLAN}"' -v2c -Pe -m ""'" $QueryDevice $OID" >&2
+      #$DEBUG && echo INT_INDEX = "$INT_INDEX" >&2
+      #exit 2
+      echo "assuming Interface_Index to be bridge_port_number (no mapping found)" >&2
+      INT_INDEX=$BRIDGENUMBER
+    fi
+  fi
+  $DEBUG && echo INT_INDEX = "$INT_INDEX" >&2
+
+  ifStackStatus="1.3.6.1.2.1.31.1.2.1.3"
+  #ifStackStatus maps Interface_Index to Interface_Subinterface
+  # substitute interface with first subinterface (if found)
+  OID=${ifStackStatus}.$INT_INDEX
+  SUBINT=`
+  snmpwalk  -r2 -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+  | head -1 \
+  | sed -e 's/^\.'"$OID"'\.//' \
+        -e 's/ = .*$//'`
+  $DEBUG && echo SUBINT is $SUBINT >&2
+  if [ "${SUBINT}x" != "0x" ]
+  then
+    INT_INDEX=$SUBINT
+  fi
+
+  ifName=".1.3.6.1.2.1.31.1.1.1.1"
+  #IF-MIB::ifName maps Interface_Index to Interface_Name
+  OID=$ifName"."$INT_INDEX
+  $DEBUG && echo Querying $OID >&2
+  INT_NAME=`
+  snmpwalk  -r2 -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+  | sed -e 's/^'"${OID}"'//' \
+        -e 's/ = [^:]*: *//'`
+  $DEBUG && echo INT_NAME is $INT_NAME >&2
+  if [ "${INT_NAME}x" = "x" ] || echo $INT_NAME | fgrep -i "no such instance"  >/dev/null
+  then
+    $DEBUG && echo failed during mapping of Interface_Index to Interface_Name
+    $DEBUG && echo 'snmpwalk -r2 -On -c public -v2c -Pe -m ""'" $QueryDevice $OID"
+  fi
+
+  cdpCacheAddress=".1.3.6.1.4.1.9.9.23.1.2.1.1.4"
+  #CISCO-CDP-MIB::cdpCacheAddress maps Interface_Index to remote CDP IP address.
+  OID=$cdpCacheAddress"."$INT_INDEX
+  $DEBUG && echo Querying $OID >&2
+  LINEBREAK=false
+  HEXIP=`
+  snmpwalk  -r2 -On -c public -v2c -Pe -m "" $QueryDevice $OID \
+  | sed -e 's/^[^:]*: *//' \
+  | while read LINE
+  do
+    $LINEBREAK && echo ":"
+    echo $LINE
+    $DEBUG && $LINEBREAK && echo Adding "$LINE" to HEXIP >&2
+    LINEBREAK=true
+  done`
+  #| sed -e 's/^'"${OID}"'//' \
+  $DEBUG && echo HEXIP is $HEXIP >&2
+  if echo $HEXIP | fgrep -i "no such instance"  >/dev/null
+  then
+    #CDP gave no results
+    CDPKEY="${SWITCH}${TAB}${INT_NAME}${TAB}"
+    if CDPRECORD=`fgrep "${CDPKEY}" cdphints` >/dev/null
+    then
+      echo $CDPRECORD | ( read JUNK1 JUNK2 DECIP JUNK4; echo $DECIP )
+    else
+      echo Port $INT_NAME
+    fi
+  else
+    #Handle CDP results
+    DECIP=`echo $HEXIP | xargs --delimiter=: -L1 ./hex2dec`
+    DECIP=`echo $DECIP`
+    echo $DECIP
+    #$DEBUG && echo "$DECIP" |od -c >&2
+    CDPKEY="${SWITCH}${TAB}${INT_NAME}${TAB}"
+    CDPRECORD="${SWITCH}\t${INT_NAME}\t${DECIP}"
+    CDPKEY2="${SWITCH}\t${INT_NAME}\t"
+    #$DEBUG && echo CDPRECORD is "$CDPRECORD" >&2
+    #$DEBUG && echo CDPKEY is "$CDPKEY" >&2
+    if fgrep "${CDPKEY}" cdphints >/dev/null
+    then
+      $DEBUG && echo found a CDPKEY match "$CDPKEY" >&2
+      $DEBUG && echo "sed -i" 's#^'"${CDPKEY2}"'.*$#'"${CDPRECORD}"'#' cdphints >&2
+      sed -i 's#^'"${CDPKEY2}"'.*$#'"${CDPRECORD}"'#' cdphints
+      #echo "sed -i" 's#^'"${CDPKEY}"'.*$#'"${CDPRECORD}"'#' cdphints
+    else
+      $DEBUG && echo did not find a CDPKEY match "$CDPKEY" >&2
+      echo -e $CDPRECORD >> cdphints
+    fi
+  fi
+
+fi
+
+exit

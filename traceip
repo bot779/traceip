@@ -1,0 +1,175 @@
+#!/bin/sh
+
+while echo $1 |grep "^-" >/dev/null
+do
+  case $1 in
+
+    "--mac" )
+      #echo "MAC="`./mac2dec $2` not $2
+      MAC=`./mac2dec $2`
+      shift;shift
+     ;;
+
+    "--router" )
+      ROUTER="$2"
+      shift;shift
+      ;;
+
+    "--switch"  )
+      SWITCH="$2"
+      shift;shift
+      ;;
+
+    "--VLAN" | "--vlan" )
+      VLAN="$2"
+      shift;shift
+      ;;
+
+    "--noping" )
+      NOPING=true
+      shift
+      ;;
+
+    "--debug" )
+      DEBUG="true"
+      shift
+      ;;
+
+    "--help" | "-?" | "-h" | * )
+      echo Usage:
+      echo $0 "[OPTIONS] <IP_ADDRESS>"
+      echo OPTIONS:
+      echo "--help -? -h"
+      echo "--debug         ;# show debugging info"
+      echo "--router        ;# specify a router to query"
+      echo "--switch        ;# specify a switch to query"
+      echo "--vlan          ;# specify the vlan number of the IP address"
+      echo "--mac           ;# specify the mac address for the IP address"
+      echo "--noping        ;# do not ping IP address first"
+
+      exit
+      ;;
+
+  esac
+done
+
+NL="
+"
+
+DEBUG=${DEBUG:-false}
+NOPING=${NOPING:-false}
+DEBUGOPT=""
+$DEBUG && DEBUGOPT="--debug"
+ROUTER=${ROUTER:-192.168.1.254}
+SWITCH=${SWITCH:-"192.168.1.254"}
+
+if [ -z "$VLAN" -a ! -z "$MAC" ]
+then
+  echo $0 $@
+  echo "--vlan is required when --mac is specified"
+  exit 2
+fi
+
+if [ "${1}x" = "x" -a -z "$MAC" ]
+then
+  echo $0 $@
+  echo MAC is $MAC
+  echo IP address required
+  $DEBUG && id
+  exit 2
+fi
+
+IPAddress=$1
+if [ ! -z $IPAddress ]
+then
+  if ! $NOPING
+  then
+    if ! ping -c1 -w1 $IPAddress >/dev/null
+    then
+      echo WARNING: $IPAddress is not pingable >&2
+    fi
+  fi
+fi
+
+
+if [ "${VLAN}x" = "x" ]
+then
+  $DEBUG && echo VLAN is not set "$VLAN" >&2
+  # The VLAN number was not specified
+  VLAN=`echo $IPAddress|sed -e 's/^[^.]*\.[^.]*\.//' -e 's/\.[^.]*$//'`
+  # Assuming that the third octet matches the VLAN number...
+  $DEBUG && echo Third Octet is $VLAN >&2
+fi
+echo VLAN is "$VLAN" >&2
+
+if [ -z "$MAC" ]
+then
+  $DEBUG && echo CALLING ./getarptable --ip $IPAddress --router $ROUTER --vlan $VLAN >&2
+  ./getarptable --ip $IPAddress --router $ROUTER --vlan $VLAN
+  MAC=`./getarptable --ip $IPAddress --router $ROUTER --decoutput $DEBUGOPT --vlan $VLAN`
+fi
+
+echo $SWITCH
+LIST=$SWITCH
+RESULT=""
+QUEUE=""
+ERRORLEVEL=0
+
+while [ "${RESULT}x" = "x" ]
+do
+  #$DEBUG && echo SWITCH is "$SWITCH" and LIST is "$LIST" >&2
+  if ! echo "$LIST" | fgrep "$SWITCH" >/dev/null
+  then
+    #if SWITCH not in LIST then add SWITCH to LIST
+    LIST="${LIST}${NL}${SWITCH}"
+    $DEBUG && echo LIST now includes $LIST >&2
+  fi
+  $DEBUG && echo SWITCH is $SWITCH >&2
+  if ping -c1 -w1 $SWITCH >/dev/null
+  then
+    $DEBUG && echo CALLING ./getmactable --mac $MAC --switch $SWITCH --vlan $VLAN $DEBUGOPT >&2
+    RESULT=`./getmactable --mac $MAC --switch $SWITCH --vlan $VLAN $DEBUGOPT`
+    ERRORLEVEL=$?
+    if echo $RESULT | fgrep -i port >/dev/null
+    then
+      #The result stands
+      echo $RESULT
+    else
+      if echo $RESULT | fgrep " " >/dev/null
+      then
+        $DEBUG && echo Got multiple Results $RESULT >&2
+        # Now I have to save the extra reaults in a QUEUE
+        for ITEM in $RESULT
+        do
+          if ! echo "$LIST" | fgrep "$ITEM" >/dev/null
+          then
+            #if ITEM not in LIST then add ITEM to QUEUE
+            if [ "${QUEUE}x" = "x" ]
+            then
+              QUEUE="$ITEM"
+            else
+              QUEUE=${QUEUE}${NL}${ITEM}
+            fi
+          fi
+        done
+        SWITCH=`echo "$QUEUE"|head -1`
+        QUEUE=`echo "$QUEUE"|fgrep -v "$SWITCH"`
+        RESULT=""
+      else
+        SWITCH=$RESULT
+        RESULT=""
+      fi
+      echo $SWITCH
+    fi
+  else
+    echo ERROR: "$SWITCH" is not pingable >&2
+    exit 2
+  fi
+  if [ "${ERRORLEVEL}0" != "00" ]
+  then
+    echo Exiting in ERROR $ERRORLEVER >&2
+    exit $ERRORLEVEL
+  else
+    $DEBUG && echo ERRORLEVEL is "$ERRORLEVEL"
+  fi
+done
